@@ -1,0 +1,255 @@
+// Prisma schema for FITPRO SPORTS SOLUTIONS
+// Multi-tenant, community-scoped sports coaching, facility management and booking platform
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// User roles for RBAC (Rule: resident, coach, community_admin, super_admin)
+enum UserRole {
+  RESIDENT
+  COACH
+  COMMUNITY_ADMIN
+  SUPER_ADMIN
+}
+
+// Verification status for resident in a gated community
+enum VerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+// Booking status
+enum BookingStatus {
+  CONFIRMED
+  COACH_BEING_ASSIGNED
+  COMPLETED
+  CANCELLED
+}
+
+// Payment status
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+// User model
+model User {
+  id            String             @id @default(cuid())
+  mobile        String             @unique // 10-digit mobile number for OTP auth
+  name          String?
+  email         String?            @unique
+  role          UserRole           @default(RESIDENT)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  // Relationships
+  residents     CommunityResident[]
+  familyMembers FamilyMember[]
+  bookings      Booking[]
+  assignedBatches Batch[]          @relation("CoachBatches")
+  notifications Notification[]
+  adminCommunity Community?        @relation("CommunityAdmin")
+
+  @@map("users")
+}
+
+// Gated Community model
+model Community {
+  id          String              @id @default(cuid())
+  name        String
+  slug        String              @unique
+  area        String
+  city        String              @default("Hyderabad")
+  code        String?             @unique // Optional community code for noticeboard signup
+  isPaused    Boolean             @default(false) // Toggle to pause bookings
+  adminId     String?             @unique
+  admin       User?               @relation("CommunityAdmin", fields: [adminId], references: [id])
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  // Relationships
+  residents   CommunityResident[]
+  sports      CommunitySport[]
+  bookings    Booking[]
+
+  @@map("communities")
+}
+
+// Many-to-many relationship linking a resident to a community with flat/block verification
+model CommunityResident {
+  id           String             @id @default(cuid())
+  userId       String
+  communityId  String
+  block        String?
+  flatNumber   String
+  status       VerificationStatus @default(PENDING)
+  isOwner      Boolean            @default(false)
+  isCurrent    Boolean            @default(true) // For handling move-outs
+  verifiedAt   DateTime?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  community    Community          @relation(fields: [communityId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, communityId, flatNumber])
+  @@map("community_residents")
+}
+
+// Family members / children participating in sports
+model FamilyMember {
+  id                    String    @id @default(cuid())
+  userId                String
+  name                  String
+  dateOfBirth           DateTime
+  skillLevel            String    @default("Beginner") // Beginner, Intermediate, Advanced
+  healthNotes           String?   // Any medical/safety notes for coach
+  guardianConsentGiven  Boolean   @default(true) // "I confirm I am the parent or guardian of this child"
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings              Booking[]
+
+  @@map("family_members")
+}
+
+// Master sports catalogue (8 confirmed sports from content source of truth)
+model Sport {
+  id           String           @id @default(cuid())
+  name         String           @unique // Swimming, Basketball, Cricket, etc.
+  slug         String           @unique
+  headline     String
+  description  String
+  safetyRules  String?
+  kitRequired  String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  communities  CommunitySport[]
+
+  @@map("sports")
+}
+
+// Sports offered per community (each community has its own selection)
+model CommunitySport {
+  id          String           @id @default(cuid())
+  communityId String
+  sportId     String
+  isActive    Boolean          @default(true)
+
+  community   Community        @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  sport       Sport            @relation(fields: [sportId], references: [id], onDelete: Cascade)
+  batches     Batch[]
+  packages    PricingPackage[]
+
+  @@unique([communityId, sportId])
+  @@map("community_sports")
+}
+
+// Batches scheduled for a community sport
+model Batch {
+  id                String         @id @default(cuid())
+  communitySportId  String
+  title             String         // e.g. "Sat & Sun, 7:00–7:45 AM, Clubhouse Pool"
+  daysOfWeek        String         // e.g. "Saturday,Sunday"
+  startTime         String         // e.g. "07:00"
+  endTime           String         // e.g. "07:45"
+  location          String         // e.g. "Clubhouse Pool"
+  maxSeats          Int            @default(10)
+  coachId           String?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  communitySport    CommunitySport @relation(fields: [communitySportId], references: [id], onDelete: Cascade)
+  coach             User?          @relation("CoachBatches", fields: [coachId], references: [id])
+  bookings          Booking[]
+
+  @@map("batches")
+}
+
+// Private packages & prices (Strict rule: each community sees ONLY its own prices)
+model PricingPackage {
+  id                String         @id @default(cuid())
+  communitySportId  String
+  title             String         // e.g. "1 Month Package"
+  durationMonths    Int            @default(1)
+  priceInPaisa      Int            // Price in paisa (e.g. 200000 = ₹2,000)
+  sessionsCount     Int?
+  isActive          Boolean        @default(true)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  communitySport    CommunitySport @relation(fields: [communitySportId], references: [id], onDelete: Cascade)
+  bookings          Booking[]
+
+  @@map("pricing_packages")
+}
+
+// Booking record
+model Booking {
+  id             String         @id @default(cuid())
+  bookingNumber  String         @unique // Human-friendly e.g. "FP-2026-XXXX"
+  userId         String
+  communityId    String
+  batchId        String
+  packageId      String
+  participantId  String
+  status         BookingStatus  @default(CONFIRMED)
+  startDate      DateTime
+  endDate        DateTime
+  totalInPaisa   Int
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  user           User           @relation(fields: [userId], references: [id])
+  community      Community      @relation(fields: [communityId], references: [id])
+  batch          Batch          @relation(fields: [batchId], references: [id])
+  package        PricingPackage @relation(fields: [packageId], references: [id])
+  participant    FamilyMember   @relation(fields: [participantId], references: [id])
+  payment        Payment?
+
+  @@map("bookings")
+}
+
+// Payment record with Razorpay signature tracking
+model Payment {
+  id                 String        @id @default(cuid())
+  bookingId          String        @unique
+  razorpayOrderId    String        @unique
+  razorpayPaymentId  String?       @unique
+  razorpaySignature  String?
+  amountInPaisa      Int
+  status             PaymentStatus @default(PENDING)
+  receiptNumber      String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  booking            Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@map("payments")
+}
+
+// In-app notifications
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+}
